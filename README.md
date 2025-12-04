@@ -8,6 +8,7 @@ pip install -e .
 
 ## Usage
 
+```python
 from secret_santa import Participant, solve
 
 participants = {
@@ -17,3 +18,4 @@ participants = {
 }
 
 print(solve(participants))
+```
