@@ -50,7 +50,7 @@ jobs:
         if: steps.check_version.outputs.version_changed == 'true'
         run: |
           zip -r source-code.zip src/ pyproject.toml README.md main.py Makefile -x "*.pyc" "*/__pycache__/*" "*.egg-info/*"
-          tar -czf source-code.tar.gz src/ pyproject.toml README.md main.py Makefile --exclude="*.pyc" --exclude="__pycache__" --exclude="*.egg-info"
+          tar --exclude="*.pyc" --exclude="__pycache__" --exclude="*.egg-info" -czf source-code.tar.gz src/ pyproject.toml README.md main.py Makefile
 
       - name: Create Release
         if: steps.check_version.outputs.version_changed == 'true'
