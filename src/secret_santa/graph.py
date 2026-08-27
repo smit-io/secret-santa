@@ -54,16 +54,20 @@ def _precheck_participants(participants: Dict[str, Participant]) -> None:
         if conflict:
             raise InclusionExclusionConflict(p.name, conflict)
 
-    # 3. Detect participants excluded by everyone
+    # 3. Detect givers left with no possible recipient
+    _detect_mutual_exclusion_groups(participants)
+
+    # 4. Detect participants excluded by every *other* participant.
+    # A participant never gives to themselves, so their own exclude set says
+    # nothing about whether they can receive.
     excluded_by_all = []
     for candidate in names:
-        if all(candidate in p.exclude for p in participants.values()):
+        givers = [p for name, p in participants.items() if name != candidate]
+        if all(candidate in p.exclude for p in givers):
             excluded_by_all.append(candidate)
 
     if excluded_by_all:
         raise FullyExcludedParticipant(excluded_by_all)
-
-    _detect_mutual_exclusion_groups(participants)
 
 
 def build_graph(
@@ -76,7 +80,7 @@ def build_graph(
 
     _precheck_participants(participants)
 
-    G = nx.DiGraph()
+    G: nx.DiGraph = nx.DiGraph()
 
     givers = {f"g:{p}" for p in participants}
     receivers = {f"r:{p}" for p in participants}
@@ -101,7 +105,8 @@ def build_graph(
 
         if G.out_degree(giver) == 0:
             raise MutualExclusionGroup(
-                f"{name} has no valid recipients under current rules"
+                {name},
+                f"{name} has no valid recipients under current rules",
             )
 
     return G

@@ -286,6 +286,20 @@ def test_not_fully_excluded_multiple_valid():
     assert len(result) == 5
 
 
+def test_fully_excluded_without_self_exclusion():
+    # D is unreachable: every other participant excludes them. D does not
+    # exclude themselves, and should not need to for this to be detected.
+    participants = {
+        "A": Participant("A", exclude={"D"}),
+        "B": Participant("B", exclude={"D"}),
+        "C": Participant("C", exclude={"D"}),
+        "D": Participant("D"),
+    }
+
+    with pytest.raises(FullyExcludedParticipant):
+        solve(participants)
+
+
 def test_mutual_pair_exclusion():
     participants = {
         "A": Participant("A", exclude={"B"}),
