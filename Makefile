@@ -19,6 +19,9 @@ help:
 	@echo "  make clean       - Remove build artifacts"
 	@echo "  make requirements - Export dependencies to requirements.txt"
 	@echo "  make requirements-dev - Export dev dependencies to requirements-dev.txt"
+	@echo "  make ci          - Run the CI checks locally (no Docker)"
+	@echo "  make ci-act      - Run the CI workflow in Docker via act"
+	@echo "  make ci-act-list - List workflow jobs act would run"
 	@echo ""	@echo "Use 'make <target>' to run a specific target. For example: 'make test' to run tests."
 
 # ---------- First-time project setup ----------
@@ -62,6 +65,29 @@ lint-format: sync
 
 typecheck: sync
 	uv run mypy src
+
+# ---------- Local CI ----------
+# Mirrors .github/workflows/ci.yml step-for-step, without Docker.
+ci: sync
+	uv run ruff check .
+	uv run ruff format --check .
+	uv run mypy src
+	uv run pytest -v
+
+# Runs the real workflow in a container via act (https://github.com/nektos/act).
+ci-act:
+	@command -v act >/dev/null 2>&1 || { \
+		echo "❌ act is not installed. Install with: brew install act"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ Docker daemon is not running. Start Docker Desktop/OrbStack first."; \
+		exit 1; \
+	}
+	act pull_request -W .github/workflows/ci.yml
+
+ci-act-list:
+	act -l
 
 # ---------- Build ----------
 build: clean lint-fix lint-format sync
