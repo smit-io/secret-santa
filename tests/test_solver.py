@@ -1,7 +1,12 @@
 import pytest
 from faker import Faker
 
-from secret_santa import Participant, solve  # type: ignore[import-untyped]
+from secret_santa import (  # type: ignore[import-untyped]
+    Participant,
+    solve,
+    solve_ignore_exclusions,
+    solve_ignore_inclusions,
+)
 from secret_santa.exceptions import (  # type: ignore[import-untyped]
     FullyExcludedParticipant,
     InclusionExclusionConflict,
@@ -203,10 +208,12 @@ def test_inclusion_cycle_two_people():
         "C": Participant("C"),
     }
 
-    # A<->B forms a 2-cycle, but both can't receive from each other and
-    # also satisfy giving constraints simultaneously with C in the system
-    with pytest.raises(NoValidAssignment):
+    # A and B are locked into each other, so neither can give to C and C
+    # cannot give to themselves — C can never receive.
+    with pytest.raises(FullyExcludedParticipant) as exc_info:
         solve(participants)
+
+    assert "C" in str(exc_info.value)
 
 
 # -----------------------------------------------------------
@@ -374,3 +381,207 @@ def test_multiple_inclusions_same_single_person_impossible():
 
     with pytest.raises(NoValidAssignment):
         solve(participants)
+
+
+# -----------------------------------------------------------
+# Diagnosis: NoValidAssignment carries the concrete Hall-violating
+# group and reachable set, not just a generic failure message.
+# -----------------------------------------------------------
+
+
+def test_diagnosis_identifies_deficient_group_via_include():
+    # A, B, C can only give to X, Y between them (3 givers, 2 receivers)
+    participants = {
+        "A": Participant("A", include={"X", "Y"}),
+        "B": Participant("B", include={"X", "Y"}),
+        "C": Participant("C", include={"X", "Y"}),
+        "X": Participant("X"),
+        "Y": Participant("Y"),
+        "Z": Participant("Z"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    assert err.deficient_givers == {"A", "B", "C"}
+    assert err.reachable_receivers == {"X", "Y"}
+
+
+def test_diagnosis_identifies_deficient_group_via_exclude():
+    participants = {
+        "A": Participant("A", exclude={"B", "C", "D", "E"}),
+        "B": Participant("B", exclude={"A", "C", "D", "E"}),
+        "C": Participant("C", exclude={"A", "B", "D", "E"}),
+        "X": Participant("X"),
+        "Y": Participant("Y"),
+        "D": Participant("D"),
+        "E": Participant("E"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    assert err.deficient_givers == {"A", "B", "C"}
+    assert err.reachable_receivers == {"X", "Y"}
+    # every suggestion comes from inside the group and points at someone the
+    # group can't currently reach — D and E, or each other
+    assert err.culprit_exclusions
+    assert all(giver in {"A", "B", "C"} for giver, _ in err.culprit_exclusions)
+    assert all(
+        target in {"A", "B", "C", "D", "E"} for _, target in err.culprit_exclusions
+    )
+    assert ("A", "D") in err.culprit_exclusions
+
+
+def test_diagnosis_message_is_informative():
+    participants = {
+        "Alice": Participant("Alice", include={"Bob"}),
+        "Charlie": Participant("Charlie", include={"Bob"}),
+        "Bob": Participant("Bob"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    message = str(exc_info.value)
+    assert "Alice" in message
+    assert "Charlie" in message
+    assert "Bob" in message
+
+
+def test_diagnosis_suggests_relaxing_an_exclusion_inside_the_group():
+    # A, B, C only exclude each other. The single fix is to let one of them
+    # give to another, so the suggestion must point inside the group.
+    participants = {
+        "A": Participant("A", exclude={"B", "C"}),
+        "B": Participant("B", exclude={"A", "C"}),
+        "C": Participant("C", exclude={"A", "B"}),
+        "X": Participant("X"),
+        "Y": Participant("Y"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    assert err.deficient_givers == {"A", "B", "C"}
+    assert err.culprit_exclusions
+
+    # acting on any single suggestion really does resolve the failure
+    giver, target = err.culprit_exclusions[0]
+    relaxed = dict(participants)
+    relaxed[giver] = Participant(giver, exclude=participants[giver].exclude - {target})
+    assert solve(relaxed)
+
+
+def test_diagnosis_does_not_suggest_exclusions_masked_by_inclusions():
+    # Each giver has an include list, so build_graph never consults their
+    # exclude set — relaxing it would change nothing.
+    participants = {
+        "A": Participant("A", include={"X", "Y"}, exclude={"Q"}),
+        "B": Participant("B", include={"X", "Y"}, exclude={"Q"}),
+        "C": Participant("C", include={"X", "Y"}, exclude={"Q"}),
+        "X": Participant("X"),
+        "Y": Participant("Y"),
+        "Q": Participant("Q"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    assert exc_info.value.culprit_exclusions == []
+
+
+def test_diagnosis_suggests_nothing_when_exclusions_are_ignored():
+    participants = {
+        "A": Participant("A", include={"X", "Y"}, exclude={"Q"}),
+        "B": Participant("B", include={"X", "Y"}, exclude={"Q"}),
+        "C": Participant("C", include={"X", "Y"}, exclude={"Q"}),
+        "X": Participant("X"),
+        "Y": Participant("Y"),
+        "Q": Participant("Q"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve_ignore_exclusions(participants)
+
+    assert exc_info.value.culprit_exclusions == []
+
+
+def test_unreceivable_via_inclusions_is_named_directly():
+    # Nobody can give to B: A and E exclude B, D excludes B, and C has an
+    # inclusion list B isn't on. No single exclude rule covers everyone, so
+    # this is only visible from the built graph.
+    participants = {
+        "A": Participant("A", exclude={"B", "C", "E"}),
+        "B": Participant("B"),
+        "C": Participant("C", include={"D", "E"}),
+        "D": Participant("D", exclude={"A", "B", "C"}),
+        "E": Participant("E", exclude={"B"}),
+    }
+
+    with pytest.raises(FullyExcludedParticipant) as exc_info:
+        solve(participants)
+
+    assert "B" in str(exc_info.value)
+
+
+def test_unreceivable_when_everyone_omits_them_from_inclusions():
+    participants = {
+        "A": Participant("A", include={"B", "C"}),
+        "B": Participant("B", include={"A", "C"}),
+        "C": Participant("C", include={"A", "B"}),
+        "D": Participant("D", include={"A", "B"}),
+        "E": Participant("E", include={"A", "B"}),
+    }
+
+    with pytest.raises(FullyExcludedParticipant) as exc_info:
+        solve(participants)
+
+    # D and E are on nobody's inclusion list
+    message = str(exc_info.value)
+    assert "D" in message and "E" in message
+
+
+def test_unreceivable_check_respects_ignored_inclusions():
+    # Same roster, but with inclusions switched off everyone can reach
+    # everyone, so it must solve rather than report an unreceivable person.
+    participants = {
+        "A": Participant("A", include={"B", "C"}),
+        "B": Participant("B", include={"A", "C"}),
+        "C": Participant("C", include={"A", "B"}),
+        "D": Participant("D", include={"A", "B"}),
+        "E": Participant("E", include={"A", "B"}),
+    }
+
+    assert solve_ignore_inclusions(participants)
+
+
+def test_diagnosis_reports_independent_groups_separately():
+    # Two unrelated over-constrained trios; they must not be merged into one
+    # six-person "group" that never actually interacts.
+    participants = {
+        "A": Participant("A", include={"X", "Y"}),
+        "B": Participant("B", include={"X", "Y"}),
+        "C": Participant("C", include={"X", "Y"}),
+        "P": Participant("P", include={"M", "N"}),
+        "Q": Participant("Q", include={"M", "N"}),
+        "R": Participant("R", include={"M", "N"}),
+        "X": Participant("X"),
+        "Y": Participant("Y"),
+        "M": Participant("M"),
+        "N": Participant("N"),
+        "Z": Participant("Z"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    groups = {frozenset(g.givers) for g in err.deficient_groups}
+    assert groups == {frozenset({"A", "B", "C"}), frozenset({"P", "Q", "R"})}
+    # the single-group attributes front one real group, not the union
+    assert err.deficient_givers in ({"A", "B", "C"}, {"P", "Q", "R"})
+    assert len(err.reachable_receivers) == 2
