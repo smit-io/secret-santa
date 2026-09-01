@@ -125,9 +125,7 @@ def find_deficient_sets(
     seen_keys: Set[tuple[frozenset[str], frozenset[str]]] = set()
 
     for seed in sorted(givers - set(giver_to_receiver.keys())):
-        group_givers, group_receivers = _alternating_reach(
-            G, receiver_to_giver, seed
-        )
+        group_givers, group_receivers = _alternating_reach(G, receiver_to_giver, seed)
         key = (frozenset(group_givers), frozenset(group_receivers))
         if key in seen_keys:
             continue

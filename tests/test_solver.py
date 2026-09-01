@@ -472,9 +472,7 @@ def test_diagnosis_suggests_relaxing_an_exclusion_inside_the_group():
     # acting on any single suggestion really does resolve the failure
     giver, target = err.culprit_exclusions[0]
     relaxed = dict(participants)
-    relaxed[giver] = Participant(
-        giver, exclude=participants[giver].exclude - {target}
-    )
+    relaxed[giver] = Participant(giver, exclude=participants[giver].exclude - {target})
     assert solve(relaxed)
 
 
