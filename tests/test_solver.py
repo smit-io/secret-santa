@@ -4,6 +4,7 @@ from faker import Faker
 from secret_santa import (  # type: ignore[import-untyped]
     Participant,
     solve,
+    solve_ignore_all_constraints,
     solve_ignore_exclusions,
     solve_ignore_inclusions,
 )
@@ -13,6 +14,7 @@ from secret_santa.exceptions import (  # type: ignore[import-untyped]
     MutualExclusionGroup,
     NotEnoughParticipants,
     NoValidAssignment,
+    SecretSantaError,
     UnknownParticipantReferenced,
 )
 
@@ -585,3 +587,209 @@ def test_diagnosis_reports_independent_groups_separately():
     # the single-group attributes front one real group, not the union
     assert err.deficient_givers in ({"A", "B", "C"}, {"P", "Q", "R"})
     assert len(err.reachable_receivers) == 2
+
+
+# -----------------------------------------------------------
+# Rosters that solve. These are the shapes people most often assume
+# are impossible, and they guard the documented scenario table.
+# -----------------------------------------------------------
+
+
+def test_couples_do_not_gift_their_partner():
+    participants = {
+        "A": Participant("A", exclude={"B"}),
+        "B": Participant("B", exclude={"A"}),
+        "C": Participant("C", exclude={"D"}),
+        "D": Participant("D", exclude={"C"}),
+        "E": Participant("E"),
+        "F": Participant("F"),
+    }
+
+    result = solve(participants)
+
+    assert_valid_result(result)
+    assert result["A"] != "B" and result["B"] != "A"
+    assert result["C"] != "D" and result["D"] != "C"
+
+
+def test_everyone_excludes_two_others():
+    # Z=2 is below floor(N/2)=3, so this solves whatever the arrangement.
+    participants = {
+        "A": Participant("A", exclude={"B", "C"}),
+        "B": Participant("B", exclude={"C", "D"}),
+        "C": Participant("C", exclude={"D", "E"}),
+        "D": Participant("D", exclude={"E", "F"}),
+        "E": Participant("E", exclude={"F", "A"}),
+        "F": Participant("F", exclude={"A", "B"}),
+    }
+
+    result = solve(participants)
+
+    assert_valid_result(result)
+    for giver, receiver in result.items():
+        assert receiver not in participants[giver].exclude
+
+
+def test_everyone_includes_three_others():
+    participants = {
+        "A": Participant("A", include={"B", "C", "D"}),
+        "B": Participant("B", include={"C", "D", "E"}),
+        "C": Participant("C", include={"D", "E", "A"}),
+        "D": Participant("D", include={"E", "A", "B"}),
+        "E": Participant("E", include={"A", "B", "C"}),
+    }
+
+    result = solve(participants)
+
+    assert_valid_result(result)
+    for giver, receiver in result.items():
+        assert receiver in participants[giver].include
+
+
+def test_self_exclusion_is_a_no_op():
+    # Nobody gives to themselves anyway, so excluding yourself changes nothing.
+    participants = {
+        "A": Participant("A", exclude={"A"}),
+        "B": Participant("B"),
+        "C": Participant("C"),
+    }
+
+    assert_valid_result(solve(participants))
+
+
+def test_locked_pair_solves_when_others_can_cover_each_other():
+    # Same A<->B lock as test_inclusion_cycle_two_people, which fails with
+    # three people because nobody is left to give to C. With five it solves,
+    # because C, D and E can cover each other.
+    participants = {
+        "A": Participant("A", include={"B"}),
+        "B": Participant("B", include={"A"}),
+        "C": Participant("C"),
+        "D": Participant("D"),
+        "E": Participant("E"),
+    }
+
+    result = solve(participants)
+
+    assert_valid_result(result)
+    assert result["A"] == "B"
+    assert result["B"] == "A"
+
+
+def test_include_only_self_leaves_no_recipients():
+    participants = {
+        "A": Participant("A", include={"A"}),
+        "B": Participant("B"),
+        "C": Participant("C"),
+    }
+
+    with pytest.raises(MutualExclusionGroup) as exc_info:
+        solve(participants)
+
+    assert "A" in str(exc_info.value)
+
+
+def test_solve_ignore_all_constraints():
+    # Impossible under its own rules, trivial once every rule is dropped.
+    participants = {
+        "A": Participant("A", include={"B"}),
+        "B": Participant("B", include={"A"}),
+        "C": Participant("C", exclude={"A", "B"}),
+    }
+
+    with pytest.raises(SecretSantaError):
+        solve(participants)
+
+    assert_valid_result(solve_ignore_all_constraints(participants))
+
+
+# -----------------------------------------------------------
+# Diagnosis internals
+# -----------------------------------------------------------
+
+
+def test_culprits_skip_self_exclusions_and_already_reachable_targets():
+    # A, B and C reach only D and E between them — three givers, two
+    # receivers. A excludes both itself and E; neither is worth suggesting.
+    # Excluding yourself is a no-op, and B and C already reach E, so letting
+    # A reach it too would not widen the group's options.
+    participants = {
+        "A": Participant("A", exclude={"A", "B", "C", "E"}),
+        "B": Participant("B", exclude={"A", "C"}),
+        "C": Participant("C", exclude={"A", "B"}),
+        "D": Participant("D"),
+        "E": Participant("E"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    assert err.deficient_givers == {"A", "B", "C"}
+    assert err.reachable_receivers == {"D", "E"}
+
+    culprits = err.culprit_exclusions
+    assert culprits
+    # never suggest relaxing a self-exclusion
+    assert all(giver != target for giver, target in culprits)
+    # never suggest a target the group can already reach
+    assert all(target not in err.reachable_receivers for _, target in culprits)
+    assert ("A", "E") not in culprits
+    # the exclusions that would genuinely widen the group are suggested
+    assert ("A", "B") in culprits
+
+
+def test_each_unmatched_giver_yields_a_minimal_group():
+    # Three givers restricted to one receiver leaves two unmatched givers.
+    # Each reports its own minimal witness — a pair sharing the one receiver
+    # — rather than one merged group of all three.
+    participants = {
+        "A": Participant("A", include={"D"}),
+        "B": Participant("B", include={"D"}),
+        "C": Participant("C", include={"D"}),
+        "D": Participant("D"),
+        "E": Participant("E"),
+    }
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    assert len(err.deficient_groups) == 2
+    for group in err.deficient_groups:
+        # every group is a genuine Hall violation on its own
+        assert len(group.givers) > len(group.receivers)
+        assert group.givers <= {"A", "B", "C"}
+        assert group.receivers == {"D"}
+
+
+def test_long_group_message_is_truncated():
+    # Nine givers sharing the same eight receivers. The reported group is all
+    # nine, so the message must summarise rather than list every name.
+    targets = [f"R{i}" for i in range(8)]
+    givers = [f"G{i}" for i in range(9)]
+
+    participants = {name: Participant(name, include=set(targets)) for name in givers}
+    for name in targets:
+        participants[name] = Participant(name)
+    for name in ("X1", "X2", "X3"):
+        participants[name] = Participant(name)
+
+    with pytest.raises(NoValidAssignment) as exc_info:
+        solve(participants)
+
+    err = exc_info.value
+    message = str(err)
+    assert err.deficient_givers == set(givers)
+    assert "and 1 more" in message
+    # only the first eight names are spelled out
+    assert sum(name in message for name in givers) == 8
+
+
+def test_message_handles_a_group_that_reaches_no_one():
+    # solve() cannot produce this state — a giver reaching nobody is caught
+    # earlier as MutualExclusionGroup — but the exception is public, so its
+    # message must still read correctly when constructed directly.
+    err = NoValidAssignment(deficient_givers={"A", "B"}, reachable_receivers=set())
+
+    assert "no one" in str(err)
