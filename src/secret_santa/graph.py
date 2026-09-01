@@ -13,46 +13,57 @@ from .models import Participant
 
 
 def _detect_mutual_exclusion_groups(participants: Dict[str, Participant]) -> None:
+    """Reject anyone left with no possible recipient by exclusions alone.
+
+    There used to be a second pass here looking for a "mutual pair trap": two
+    people both restricted to the pair {a, b} who still can't gift each other.
+    It could never fire. allowed[x] never contains x, so a non-empty
+    allowed[a] within {a, b} is exactly {b}, and likewise allowed[b] is {a} —
+    meaning each could always reach the other. The empty case is the check
+    below. Inclusion-driven dead ends are caught by the out-degree check in
+    build_graph, which sees the edges these sets don't describe.
+    """
     names: Set[str] = set(participants.keys())
 
     allowed: Dict[str, Set[str]] = {
         p.name: names - {p.name} - p.exclude for p in participants.values()
     }
 
-    # Case 1 — no recipients at all
     for giver, recips in allowed.items():
         if not recips:
             raise MutualExclusionGroup({giver})
 
-    # Case 2 — mutual pair trap (very common real bug)
-    for a in names:
-        for b in names:
-            if a >= b:
-                continue
 
-            pair = {a, b}
+def _precheck_participants(
+    participants: Dict[str, Participant],
+    use_inclusions: bool,
+    use_exclusions: bool,
+) -> None:
+    """Reject rosters that cannot work, before any matching is attempted.
 
-            # both restricted to the pair
-            if allowed[a] <= pair and allowed[b] <= pair:
-                # but the internal cycle is impossible
-                if b not in allowed[a] or a not in allowed[b]:
-                    raise MutualExclusionGroup(pair)
-
-
-def _precheck_participants(participants: Dict[str, Participant]) -> None:
+    Each check is gated on the rules actually in force. Rejecting a roster
+    over an exclusion that solve_ignore_exclusions was asked to disregard
+    would defeat the point of calling it.
+    """
     names = set(participants.keys())
 
-    # 1. Unknown names in include/exclude
+    # 1. Unknown names in include/exclude. Always checked: a name that is not
+    # on the roster is a typo whichever rules are active.
     for p in participants.values():
         unknown = (p.include | p.exclude) - names
         if unknown:
             raise UnknownParticipantReferenced(p.name, unknown)
 
-    # 2. Inclusion and exclusion conflict
-    for p in participants.values():
-        conflict = p.include & p.exclude
-        if conflict:
-            raise InclusionExclusionConflict(p.name, conflict)
+    # 2. Inclusion and exclusion conflict. Only a contradiction when both
+    # sets are being honoured.
+    if use_inclusions and use_exclusions:
+        for p in participants.values():
+            conflict = p.include & p.exclude
+            if conflict:
+                raise InclusionExclusionConflict(p.name, conflict)
+
+    if not use_exclusions:
+        return
 
     # 3. Detect givers left with no possible recipient
     _detect_mutual_exclusion_groups(participants)
@@ -110,9 +121,15 @@ def find_deficient_sets(
     are reported as two groups instead of being merged into a single
     confusing blob. Because a maximum matching admits no augmenting
     path, every receiver reached is matched to a giver in S, so each
-    group has deficiency exactly 1. Duplicates are collapsed and the
-    smallest (most actionable) group comes first. Runs in O(V*(V+E))
-    worst case, O(V+E) for the common single-group failure.
+    group has deficiency exactly 1, and the smallest (most actionable)
+    group comes first.
+
+    The groups are distinct without needing to be deduplicated: only
+    matched givers are ever added to a tree, so each tree contains
+    exactly one unmatched giver — the seed it started from.
+
+    Runs in O(V*(V+E)) worst case, O(V+E) for the common single-group
+    failure.
     """
     receivers = {n for n in G if n not in givers}
 
@@ -122,28 +139,12 @@ def find_deficient_sets(
     receiver_to_giver = {r: g for g, r in matching.items() if r in receivers}
 
     groups: list[tuple[Set[str], Set[str]]] = []
-    seen_keys: Set[tuple[frozenset[str], frozenset[str]]] = set()
 
     for seed in sorted(givers - set(giver_to_receiver.keys())):
-        group_givers, group_receivers = _alternating_reach(G, receiver_to_giver, seed)
-        key = (frozenset(group_givers), frozenset(group_receivers))
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        groups.append((group_givers, group_receivers))
+        groups.append(_alternating_reach(G, receiver_to_giver, seed))
 
     groups.sort(key=lambda gr: (len(gr[0]), sorted(gr[0])))
     return groups
-
-
-def find_deficient_set(
-    G: nx.DiGraph, matching: Dict[str, str], givers: Set[str]
-) -> tuple[Set[str], Set[str]]:
-    """The smallest Hall-violating group, or empty sets if the matching
-    is in fact perfect. See find_deficient_sets().
-    """
-    groups = find_deficient_sets(G, matching, givers)
-    return groups[0] if groups else (set(), set())
 
 
 def find_culprit_exclusions(
@@ -198,7 +199,7 @@ def build_graph(
     if len(participants) < 2:
         raise NotEnoughParticipants("At least 2 participants required")
 
-    _precheck_participants(participants)
+    _precheck_participants(participants, use_inclusions, use_exclusions)
 
     G: nx.DiGraph = nx.DiGraph()
 
